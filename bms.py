@@ -12,6 +12,7 @@ import json
 import atexit
 import sys
 import constants
+import datetime
 
 print("Starting up...")
 
@@ -51,6 +52,7 @@ packs = 1
 cells = 13
 temps = 6
 
+datadict = {}
 
 print("Connection Type: " + connection_type)
 
@@ -164,7 +166,7 @@ def ha_discovery():
     global packs
 
     if ha_discovery_enabled:
-        
+
         print("Publishing HA Discovery topic...")
 
         disc_payload['availability_topic'] = config['mqtt_base_topic'] + "/availability"
@@ -391,6 +393,8 @@ def ha_discovery():
 
     else:
         print("HA Discovery Disabled")
+
+
 
 def chksum_calc(data):
 
@@ -649,7 +653,7 @@ def bms_getPackNumber(bms):
 
     return(success,packNumber)
 
-def bms_getVersion(comms):
+def bms_getVersion(comms,datadict):
 
     global bms_version
 
@@ -662,13 +666,16 @@ def bms_getVersion(comms):
 
         bms_version = bytes.fromhex(INFO.decode("ascii")).decode("ASCII")
         client.publish(config['mqtt_base_topic'] + "/bms_version",bms_version)
+        datadict[bms_sn]['bms_version'] = bms_version
+
         print("BMS Version: " + bms_version)
+
     except:
         return(False,"Error extracting BMS version")
 
-    return(success,bms_version)
+    return(success,bms_version,datadict)
 
-def bms_getSerial(comms):
+def bms_getSerial(comms,datadict):
 
     global bms_sn
     global pack_sn
@@ -685,15 +692,17 @@ def bms_getSerial(comms):
         pack_sn = bytes.fromhex(INFO[40:68].decode("ascii")).decode("ASCII").replace(" ", "")
         client.publish(config['mqtt_base_topic'] + "/bms_sn",bms_sn)
         client.publish(config['mqtt_base_topic'] + "/pack_sn",pack_sn)
+        datadict[bms_sn] = {}
+        datadict[bms_sn][pack_sn] = pack_sn
         print("BMS Serial Number: " + bms_sn)
         print("Pack Serial Number: " + pack_sn)
 
     except:
         return(False,"Error extracting BMS version", False)
 
-    return(success,bms_sn,pack_sn)
+    return(success,bms_sn,pack_sn,datadict)
 
-def bms_getAnalogData(bms,batNumber):
+def bms_getAnalogData(bms,datadict,batNumber):
 
     global print_initial
     global cells
@@ -710,7 +719,7 @@ def bms_getAnalogData(bms,batNumber):
     soh = []
 
     battery = bytes(format(batNumber, '02X'), 'ASCII')
-    # print("Get analog info for battery: ", battery)
+    print("Get analog info for battery: ", battery)
 
     success, inc_data = bms_request(bms,cid2=constants.cid2PackAnalogData,info=battery)
 
@@ -728,6 +737,10 @@ def bms_getAnalogData(bms,batNumber):
         t_cell = {}
 
         for p in range(1,packs+1):
+
+            datadict[bms_sn]["pack_" + str(p)] = {}
+            datadict[bms_sn]["pack_" + str(p)]["v_cells"] = {}
+            datadict[bms_sn]["pack_" + str(p)]["temps"] = {}
 
             if p > 1:
                 cells_prev = cells
@@ -754,6 +767,8 @@ def bms_getAnalogData(bms,batNumber):
                 v_cell[(p-1,i)] = int(inc_data[byte_index:byte_index+4],16)
                 byte_index += 4
                 client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/v_cells/cell_" + str(i+1) ,str(v_cell[(p-1,i)]))
+                datadict[bms_sn]["pack_" + str(p)]["v_cells"]["cell_" + str(i+1)] = v_cell[(p-1,i)]
+
                 if print_initial:
                     print("Pack " + str(p) +", V Cell" + str(i+1) + ": " + str(v_cell[(p-1,i)]) + " mV")
 
@@ -770,6 +785,8 @@ def bms_getAnalogData(bms,batNumber):
             #Calculate cells max diff volt
             cell_max_diff_volt = cell_max_volt - cell_min_volt
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/cells_max_diff_calc" ,str(cell_max_diff_volt))
+            datadict[bms_sn]["pack_" + str(p)]["cells_max_diff_calc"] = cell_max_diff_volt
+
             if print_initial:
                 print("Pack " + str(p) +", Cell Max Diff Volt Calc: " + str(cell_max_diff_volt) + " mV")
 
@@ -782,6 +799,8 @@ def bms_getAnalogData(bms,batNumber):
                 t_cell[(p-1,i)] = (int(inc_data[byte_index:byte_index + 4],16)-2730)/10
                 byte_index += 4
                 client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/temps/temp_" + str(i+1) ,str(round(t_cell[(p-1,i)],1)))
+                datadict[bms_sn]["pack_" + str(p)]["temps"]["temp_" + str(i+1)] = round(t_cell[(p-1,i)],1)
+
                 if print_initial:
                     print("Pack " + str(p) + ", Temp" + str(i+1) + ": " + str(round(t_cell[(p-1,i)],1)) + " ℃")
 
@@ -802,18 +821,21 @@ def bms_getAnalogData(bms,batNumber):
                 i_pack[p-1] = -1*(65535 - i_pack[p-1])
             i_pack[p-1] = i_pack[p-1]/100
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/i_pack",str(i_pack[p-1]))
+            datadict[bms_sn]["pack_" + str(p)]["i_pack"] = i_pack[p-1]
             if print_initial:
                 print("Pack " + str(p) + ", I Pack: " + str(i_pack[p-1]) + " A")
 
             v_pack.append(int(inc_data[byte_index:byte_index+4],16)/1000)
             byte_index += 4
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/v_pack",str(v_pack[p-1]))
+            datadict[bms_sn]["pack_" + str(p)]["v_pack"] = v_pack[p-1]
             if print_initial:
                 print("Pack " + str(p) + ", V Pack: " + str(v_pack[p-1]) + " V")
 
             i_remain_cap.append(int(inc_data[byte_index:byte_index+4],16)*10)
             byte_index += 4
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/i_remain_cap",str(i_remain_cap[p-1]))
+            datadict[bms_sn]["pack_" + str(p)]["i_remain_cap"] = i_remain_cap[p-1]
             if print_initial:
                 print("Pack " + str(p) + ", I Remaining Capacity: " + str(i_remain_cap[p-1]) + " mAh")
 
@@ -822,28 +844,33 @@ def bms_getAnalogData(bms,batNumber):
             i_full_cap.append(int(inc_data[byte_index:byte_index+4],16)*10)
             byte_index += 4
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/i_full_cap",str(i_full_cap[p-1]))
+            datadict[bms_sn]["pack_" + str(p)]["i_full_cap"] = i_full_cap[p-1]
             if print_initial:
                 print("Pack " + str(p) + ", I Full Capacity: " + str(i_full_cap[p-1]) + " mAh")
 
             soc.append(round(i_remain_cap[p-1]/i_full_cap[p-1]*100,2))
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/soc",str(soc[p-1]))
+            datadict[bms_sn]["pack_" + str(p)]["soc"] = soc[p-1]
             if print_initial:
                 print("Pack " + str(p) + ", SOC: " + str(soc[p-1]) + " %")
 
             cycles.append(int(inc_data[byte_index:byte_index+4],16))
             byte_index += 4
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/cycles",str(cycles[p-1]))
+            datadict[bms_sn]["pack_" + str(p)]["cycles"] = cycles[p-1]
             if print_initial:
                 print("Pack " + str(p) + ", Cycles: " + str(cycles[p-1]))
 
             i_design_cap.append(int(inc_data[byte_index:byte_index+4],16)*10)
             byte_index += 4
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/i_design_cap",str(i_design_cap[p-1]))
+            datadict[bms_sn]["pack_" + str(p)]["i_design_cap"] = i_design_cap[p-1]
             if print_initial:
                 print("Pack " + str(p) + ", Design Capacity: " + str(i_design_cap[p-1]) + " mAh")
 
             soh.append(round(i_full_cap[p-1]/i_design_cap[p-1]*100,2))
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/soh",str(soh[p-1]))
+            datadict[bms_sn]["pack_" + str(p)]["soh"] = soh[p-1]
             if print_initial:
                 print("Pack " + str(p) + ", SOH: " + str(soh[p-1]) + " %")
 
@@ -860,9 +887,9 @@ def bms_getAnalogData(bms,batNumber):
     if print_initial:
         print("Script running....")
 
-    return True,True
+    return True,True,datadict
 
-def bms_getPackCapacity(bms):
+def bms_getPackCapacity(bms,datadict):
 
     byte_index = 0
 
@@ -876,28 +903,33 @@ def bms_getPackCapacity(bms):
         pack_remain_cap = int(inc_data[byte_index:byte_index+4],16)*10
         byte_index += 4
         client.publish(config['mqtt_base_topic'] + "/pack_remain_cap",str(pack_remain_cap))
+        datadict[bms_sn]['pack_remain_cap'] = pack_remain_cap
         if print_initial:
             print("Pack Remaining Capacity: " + str(pack_remain_cap) + " mAh")
 
         pack_full_cap = int(inc_data[byte_index:byte_index+4],16)*10
         byte_index += 4
         client.publish(config['mqtt_base_topic'] + "/pack_full_cap",str(pack_full_cap))
+        datadict[bms_sn]['pack_full_cap'] = pack_full_cap
         if print_initial:
             print("Pack Full Capacity: " + str(pack_full_cap) + " mAh")
 
         pack_design_cap = int(inc_data[byte_index:byte_index+4],16)*10
         byte_index += 4
         client.publish(config['mqtt_base_topic'] + "/pack_design_cap",str(pack_design_cap))
+        datadict[bms_sn]['pack_design_cap'] = pack_design_cap
         if print_initial:
             print("Pack Design Capacity: " + str(pack_design_cap) + " mAh")
 
         pack_soc = round(pack_remain_cap/pack_full_cap*100,2)
         client.publish(config['mqtt_base_topic'] + "/pack_soc",str(pack_soc))
+        datadict[bms_sn]['pack_soc'] = pack_soc
         if print_initial:
             print("Pack SOC: " + str(pack_soc) + " %")
 
         pack_soh = round(pack_full_cap/pack_design_cap*100,2)
         client.publish(config['mqtt_base_topic'] + "/pack_soh",str(pack_soh))
+        datadict[bms_sn]['pack_soh'] = pack_soh
         if print_initial:
             print("Pack SOH: " + str(pack_soh) + " %")
 
@@ -905,9 +937,9 @@ def bms_getPackCapacity(bms):
         print("Error parsing BMS pack capacity data: ", str(e))
         return False, "Error parsing BMS pack capacity data: " + str(e)
 
-    return True,True
+    return True,True,datadict
 
-def bms_getWarnInfo(bms):
+def bms_getWarnInfo(bms,datadict):
 
     byte_index = 2
     packsW = 1
@@ -972,9 +1004,15 @@ def bms_getWarnInfo(bms):
                         warnings += constants.protectState1[x+1] + " | "
                 warnings = warnings.rstrip("| ")
                 warnings += ", "
-            client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/prot_short_circuit",str(protectState1>>6 & 1))  
-            client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/prot_discharge_current",str(protectState1>>5 & 1))  
-            client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/prot_charge_current",str(protectState1>>4 & 1))  
+
+            client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/prot_short_circuit",str(protectState1>>6 & 1))
+            client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/prot_discharge_current",str(protectState1>>5 & 1))
+            client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/prot_charge_current",str(protectState1>>4 & 1))
+
+            datadict[bms_sn]["pack_" + str(p)]["prot_charge_current"] = protectState1>>4 & 1
+            datadict[bms_sn]["pack_" + str(p)]["prot_discharge_current"] = protectState1>>5 & 1
+            datadict[bms_sn]["pack_" + str(p)]["prot_short_circuit"] = protectState1>>6 & 1
+
             byte_index += 2
 
             protectState2 = ord(bytes.fromhex(inc_data[byte_index:byte_index+2].decode('ascii')))
@@ -985,7 +1023,8 @@ def bms_getWarnInfo(bms):
                         warnings += constants.protectState2[x+1] + " | "
                 warnings = warnings.rstrip("| ")
                 warnings += ", "
-            client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/fully",str(protectState2>>7 & 1))  
+            client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/fully",str(protectState2>>7 & 1))
+            datadict[bms_sn]["pack_" + str(p)]["fully"] = protectState2>>7 & 1
             byte_index += 2
 
             # instructionState = ord(bytes.fromhex(inc_data[byte_index:byte_index+2].decode('ascii')))
@@ -1006,6 +1045,14 @@ def bms_getWarnInfo(bms):
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/reverse",str(instructionState>>4 & 1))
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/ac_in",str(instructionState>>5 & 1))
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/heart",str(instructionState>>7 & 1))
+
+            datadict[bms_sn]["pack_" + str(p)]["current_limit"] = instructionState>>0 & 1
+            datadict[bms_sn]["pack_" + str(p)]["charge_fet"] = instructionState>>1 & 1
+            datadict[bms_sn]["pack_" + str(p)]["discharge_fet"] = instructionState>>2 & 1
+            datadict[bms_sn]["pack_" + str(p)]["pack_indicate"] = instructionState>>3 & 1
+            datadict[bms_sn]["pack_" + str(p)]["reverse"] = instructionState>>4 & 1
+            datadict[bms_sn]["pack_" + str(p)]["ac_in"] = instructionState>>5 & 1
+            datadict[bms_sn]["pack_" + str(p)]["heart"] = instructionState>>7 & 1
             byte_index += 2
 
             controlState = ord(bytes.fromhex(inc_data[byte_index:byte_index+2].decode('ascii')))
@@ -1057,14 +1104,17 @@ def bms_getWarnInfo(bms):
             warnings = warnings.rstrip(", ")
 
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/warnings",warnings)
+            datadict[bms_sn]["pack_" + str(p)]["warnings"] = warnings
             if print_initial:
                 print("Pack " + str(p) + ", warnings: " + warnings)
 
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/balancing1",balanceState1)
+            datadict[bms_sn]["pack_" + str(p)]["balanceState1"] = balanceState1
             if print_initial:
                 print("Pack " + str(p) + ", balancing1: " + balanceState1)
 
             client.publish(config['mqtt_base_topic'] + "/pack_" + str(p) + "/balancing2",balanceState2)
+            datadict[bms_sn]["pack_" + str(p)]["balanceState2"] = balanceState2
             if print_initial:
                 print("Pack " + str(p) + ", balancing2: " + balanceState2)
 
@@ -1078,7 +1128,11 @@ def bms_getWarnInfo(bms):
         print("Error parsing BMS warning data: ", str(e))
         return False, "Error parsing BMS warning data: " + str(e)
 
-    return True,True
+    return True,True,datadict
+
+
+
+
 
 
 print("Connecting to BMS...")
@@ -1087,16 +1141,16 @@ bms,bms_connected = bms_connect(config['bms_ip'],config['bms_port'])
 client.publish(config['mqtt_base_topic'] + "/availability","offline")
 print_initial = True
 
-success, data = bms_getVersion(bms)
-if success != True:
-    print("Error retrieving BMS version number")
-
-time.sleep(0.1)
-success, bms_sn, pack_sn = bms_getSerial(bms)
+success, bms_sn, pack_sn, datadict = bms_getSerial(bms,datadict)
 if success != True:
     print("Error retrieving BMS and pack serial numbers. This is required for HA Discovery. Exiting...")
     quit()
 
+success, data, datadict = bms_getVersion(bms,datadict)
+if success != True:
+    print("Error retrieving BMS version number")
+
+time.sleep(0.1)
 
 # Not used anymore
 # time.sleep(0.1)
@@ -1111,32 +1165,37 @@ while code_running == True:
     if bms_connected == True:
         if mqtt_connected == True:
 
-            success, data = bms_getAnalogData(bms,batNumber=255)
+            success, data, datadict = bms_getAnalogData(bms,datadict,batNumber=255)
             if success != True:
                 print("Error retrieving BMS analog data: " + data)
-            time.sleep(scan_interval/3)
-            success, data = bms_getPackCapacity(bms)
+#            time.sleep(0.1)
+
+            success, data, datadict = bms_getPackCapacity(bms,datadict)
             if success != True:
                 print("Error retrieving BMS pack capacity: " + data)
-            time.sleep(scan_interval/3)
-            success, data = bms_getWarnInfo(bms)
+#            time.sleep(0.1)
+
+            success, data, datadict = bms_getWarnInfo(bms,datadict)
             if success != True:
                 print("Error retrieving BMS warning info: " + data)
-            time.sleep(scan_interval/3)
+#            time.sleep(0.1)
 
             if print_initial:
                 ha_discovery()
-                
+
+            now = datetime.datetime.now()
+            print("Publishing Metrics: " + now.strftime("%Y-%m-%d %H:%M:%S"))
             client.publish(config['mqtt_base_topic'] + "/availability","online")
+            client.publish(config['mqtt_base_topic'] + "/metrics/" + str(bms_sn), json.dumps(datadict[bms_sn]))
+            time.sleep(scan_interval)
 
             print_initial = False
-            
 
             repub_discovery += 1
             if repub_discovery*scan_interval > 3600:
                 repub_discovery = 0
                 print_initial = True
-        
+
         else: #MQTT not connected
             client.loop_stop()
             print("MQTT disconnected, trying to reconnect...")
